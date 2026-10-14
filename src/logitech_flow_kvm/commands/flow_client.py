@@ -464,6 +464,15 @@ class FlowClient(LogitechFlowKvmCommand):
             "To complete the pairing process, enter the above code into the "
             "server console running `flow-server` when requested."
         )
+        if sys.stdout.isatty():
+            # On a terminal, log records only go to the log file until the
+            # TUI starts -- which is after pairing -- so show the code here.
+            print(
+                f"Pairing code: {pairing_code}\n"
+                "Enter it into the server console running `flow-server` "
+                "when requested.",
+                flush=True,
+            )
 
         response = self.request(
             "POST",
