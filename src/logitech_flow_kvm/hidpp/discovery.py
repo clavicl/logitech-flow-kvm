@@ -1,6 +1,8 @@
 import glob
 import os
+from typing import Any
 
+from . import transport
 from .models import BluetoothNodeInfo
 from .models import ReceiverInfo
 
@@ -24,6 +26,23 @@ BLUETOOTH_BUS = 0x0005
 # "Report ID 0x11" in a HID report descriptor: the long HID++ report. A
 # Bluetooth node declaring it speaks HID++ directly, as device number 0xFF.
 HIDPP_LONG_REPORT_DESCRIPTOR = b"\x85\x11"
+
+# hidapi's view of the same things: each top-level collection is listed
+# separately, with its usage page and usage, instead of a report descriptor.
+HIDAPI_BUS_BLUETOOTH = 2
+# A Bluetooth device's HID++ collection (long reports only).
+HIDPP_BLUETOOTH_USAGE_PAGE = 0xFF43
+# A receiver's long-report HID++ collection; its short-report sibling is
+# found by `transport.HidApiIO` itself.
+HIDPP_RECEIVER_USAGE_PAGE = transport.HIDPP_RECEIVER_USAGE_PAGE
+HIDPP_LONG_USAGE = 0x0002
+
+
+def _hidapi_enumerate() -> list[dict[str, Any]]:
+    import hid
+
+    devices: list[dict[str, Any]] = hid.enumerate(LOGITECH_VENDOR_ID, 0)
+    return sorted(devices, key=lambda info: info["path"])
 
 
 def _read_uevent(uevent_path: str) -> dict[str, str]:
@@ -68,8 +87,10 @@ def find_bluetooth_devices() -> list[BluetoothNodeInfo]:
     Unlike a receiver's node, each of these exists only while its device is
     connected here: it vanishes when the device Easy-Switches to another
     host, and comes back (possibly under a different hidraw number) when it
-    returns.
+    returns. The same goes for its HID++ collection under hidapi on Windows.
     """
+    if transport.USE_HIDAPI:
+        return _find_bluetooth_devices_hidapi()
     found = []
     for node in sorted(glob.glob(HIDRAW_SYSFS_GLOB)):
         uevent = _read_uevent(os.path.join(node, "device", "uevent"))
@@ -100,7 +121,10 @@ def find_receivers() -> list[ReceiverInfo]:
     No `pyudev` dependency: `/sys/class/hidraw/hidraw*/device/uevent` already
     exposes the vendor/product ID (`HID_ID`) and the USB interface number
     (embedded in `HID_PHYS`) that solaar's `hidapi.udev` module gets from pyudev.
+    On Windows, hidapi is used instead.
     """
+    if transport.USE_HIDAPI:
+        return _find_receivers_hidapi()
     found = []
     for node in sorted(glob.glob(HIDRAW_SYSFS_GLOB)):
         uevent = _read_uevent(os.path.join(node, "device", "uevent"))
@@ -127,4 +151,50 @@ def find_receivers() -> list[ReceiverInfo]:
             )
         )
 
+    return found
+
+
+def _find_bluetooth_devices_hidapi() -> list[BluetoothNodeInfo]:
+    found = []
+    for info in _hidapi_enumerate():
+        if info.get("usage_page") != HIDPP_BLUETOOTH_USAGE_PAGE:
+            continue
+        # Older hidapi builds don't report the bus; the usage page alone is
+        # specific enough then.
+        bus = info.get("bus_type")
+        if bus is not None and bus != HIDAPI_BUS_BLUETOOTH:
+            continue
+        found.append(
+            BluetoothNodeInfo(
+                path=info["path"].decode(),
+                product_id=info["product_id"],
+                name=info.get("product_string") or "",
+                # The Bluetooth address, without separators: "d482c597174c".
+                address=info.get("serial_number") or "",
+            )
+        )
+    return found
+
+
+def _find_receivers_hidapi() -> list[ReceiverInfo]:
+    found = []
+    for info in _hidapi_enumerate():
+        product = info["product_id"]
+        if product not in KNOWN_RECEIVERS:
+            continue
+        if info.get("interface_number") != HIDPP_USB_INTERFACE:
+            continue
+        if (info.get("usage_page"), info.get("usage")) != (
+            HIDPP_RECEIVER_USAGE_PAGE,
+            HIDPP_LONG_USAGE,
+        ):
+            continue
+        found.append(
+            ReceiverInfo(
+                path=info["path"].decode(),
+                product_id=product,
+                kind=KNOWN_RECEIVERS[product],
+                interface=HIDPP_USB_INTERFACE,
+            )
+        )
     return found

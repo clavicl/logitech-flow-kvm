@@ -1,6 +1,16 @@
 import os
 
+import pytest
+
 from logitech_flow_kvm.hidpp import discovery
+from logitech_flow_kvm.hidpp import transport
+
+
+@pytest.fixture(autouse=True)
+def use_sysfs(monkeypatch):
+    """These are the Linux (sysfs/hidraw) backend's tests, whatever the
+    platform running them."""
+    monkeypatch.setattr(transport, "USE_HIDAPI", False)
 
 
 def _write_uevent(root, name: str, lines: list[str]) -> None:

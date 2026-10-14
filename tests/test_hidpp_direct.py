@@ -12,6 +12,7 @@ from logitech_flow_kvm.hidpp import DeviceUnreachable
 from logitech_flow_kvm.hidpp import ProtocolError
 from logitech_flow_kvm.hidpp import direct
 from logitech_flow_kvm.hidpp import discovery
+from logitech_flow_kvm.hidpp import transport
 from logitech_flow_kvm.hidpp.direct import DirectDevice
 from logitech_flow_kvm.hidpp.direct import PresenceWatcher
 from logitech_flow_kvm.hidpp.models import BluetoothNodeInfo
@@ -143,6 +144,10 @@ def _write_node(root, name: str, uevent: list[str], descriptor: bytes) -> None:
 
 
 class TestFindBluetoothDevices:
+    @pytest.fixture(autouse=True)
+    def use_sysfs(self, monkeypatch):
+        monkeypatch.setattr(transport, "USE_HIDAPI", False)
+
     def test_finds_a_logitech_bluetooth_node_speaking_hidpp(
         self, tmp_path, monkeypatch
     ):
@@ -198,10 +203,11 @@ class TestFindBluetoothDevices:
         assert discovery.find_receivers() == []
 
 
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs os.mkfifo")
 class TestLongOnlyTransport:
     def test_sends_short_payloads_as_long_reports(self, tmp_path):
         fifo = str(tmp_path / "hidraw")
-        os.mkfifo(fifo)
+        os.mkfifo(fifo)  # type: ignore[attr-defined,unused-ignore]
         with HidRawIO(fifo, long_only=True) as io:
             io.write(0xFF, b"\x00\x18\x00\x00\x5a", long_message=False)
             report = os.read(io._fd, 64)
@@ -211,7 +217,7 @@ class TestLongOnlyTransport:
 
     def test_sends_short_reports_by_default(self, tmp_path):
         fifo = str(tmp_path / "hidraw")
-        os.mkfifo(fifo)
+        os.mkfifo(fifo)  # type: ignore[attr-defined,unused-ignore]
         with HidRawIO(fifo) as io:
             io.write(0xFF, b"\x00\x18\x00\x00\x5a", long_message=False)
             report = os.read(io._fd, 64)

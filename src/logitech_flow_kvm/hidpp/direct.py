@@ -36,7 +36,7 @@ from .receiver import FEATURE_CHANGE_HOST
 from .receiver import PairedDevice
 from .receiver import Receiver
 from .transport import LONG_MESSAGE_ID
-from .transport import HidRawIO
+from .transport import open_device
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +72,7 @@ NodeFinder = Callable[[], list[BluetoothNodeInfo]]
 
 
 def open_hidraw(path: str) -> ClosableTransport:
-    return HidRawIO(path, long_only=True)
+    return open_device(path, long_only=True)
 
 
 def normalize_address(address: str) -> str:

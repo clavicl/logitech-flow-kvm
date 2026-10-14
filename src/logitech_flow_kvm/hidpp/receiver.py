@@ -10,7 +10,8 @@ from .models import ReceiverInfo
 from .protocol import RECEIVER_DEVNUMBER
 from .protocol import HidppConnection
 from .protocol import Transport
-from .transport import HidRawIO
+from .transport import HidIO
+from .transport import open_device
 
 if TYPE_CHECKING:
     from .direct import DirectDevice
@@ -74,13 +75,13 @@ class Receiver:
     """An open connection to a single Logitech receiver."""
 
     def __init__(self, info: ReceiverInfo, *, transport: Transport | None = None):
-        """`transport` is a test seam; production always opens a real `HidRawIO`."""
+        """`transport` is a test seam; production always opens the real node."""
         self.path = info.path
         self.kind = info.kind
         self.product_id = info.product_id
-        self._io: HidRawIO | None = None
+        self._io: HidIO | None = None
         if transport is None:
-            self._io = HidRawIO(info.path)
+            self._io = open_device(info.path)
             transport = self._io
         self._conn = HidppConnection(transport)
         self.max_devices = self._detect_max_devices()
