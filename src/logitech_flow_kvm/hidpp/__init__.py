@@ -1,3 +1,7 @@
+from .direct import AnyReceiver
+from .direct import DirectDevice
+from .direct import PresenceWatcher
+from .discovery import find_bluetooth_devices
 from .discovery import find_receivers
 from .exceptions import DeviceUnreachable
 from .exceptions import HidppError
@@ -13,6 +17,10 @@ from .receiver import PairedDevice
 from .receiver import Receiver
 
 __all__ = [
+    "AnyReceiver",
+    "DirectDevice",
+    "PresenceWatcher",
+    "find_bluetooth_devices",
     "ChangeHostInfo",
     "DeviceUnreachable",
     "HidppError",

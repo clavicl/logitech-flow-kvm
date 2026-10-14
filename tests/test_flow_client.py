@@ -13,6 +13,7 @@ import requests
 from logitech_flow_kvm import exceptions
 from logitech_flow_kvm.commands import flow_client
 from logitech_flow_kvm.commands.flow_client import FlowClient
+from logitech_flow_kvm.hidpp.direct import DirectDevice
 from logitech_flow_kvm.hidpp.models import Notification
 from logitech_flow_kvm.util import set_host_certificate_and_token
 
@@ -1132,3 +1133,40 @@ class TestResync:
         client.resync()
 
         alive.notify_devices.assert_called_once()
+
+
+class TestBluetoothLeader:
+    def test_its_presence_is_matched_to_the_leader(self):
+        leader = DirectDevice("LEAD", find_nodes=list)
+        reconciler = Mock()
+        client = make_client(
+            reconciler=reconciler,
+            leader_id="LEAD",
+            leader_device=leader.paired_device,
+            follower_devices=[],
+        )
+        client.clipboard_enabled = False
+
+        client.callback(leader, leader.connection_notification(True))
+
+        assert client._leader_here is True
+        reconciler.observe.assert_not_called()
+        assert client._http_tasks.qsize() == 1
+
+        client.callback(leader, leader.connection_notification(False))
+
+        assert client._leader_here is False
+
+    def test_a_bluetooth_follower_is_observed(self):
+        follower = DirectDevice("FOLLOW", find_nodes=list)
+        reconciler = Mock()
+        client = make_client(
+            reconciler=reconciler,
+            leader_id="LEAD",
+            follower_devices=[follower.paired_device],
+        )
+        client.clipboard_enabled = False
+
+        client.callback(follower, follower.connection_notification(True))
+
+        reconciler.observe.assert_called_once_with(follower.paired_device, True)

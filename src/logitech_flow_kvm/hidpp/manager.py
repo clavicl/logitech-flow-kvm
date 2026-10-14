@@ -8,6 +8,12 @@ for a listener dying, then closes everything, re-runs discovery until the
 receivers are back (their hidraw paths usually change across a replug), and
 asks the application -- via its `rebind` callback -- to re-resolve its
 devices against the freshly opened receivers.
+
+Bluetooth devices (`DirectDevice`s) sit outside all of that. One leaving is
+routine -- it is what Easy-Switching away looks like -- and is reported as a
+disconnect by its `PresenceWatcher`, never as something to recover from. They
+are watched from start to stop, and handed to every `rebind` alongside the
+rebuilt receivers.
 """
 
 import logging
@@ -15,6 +21,9 @@ import threading
 from collections.abc import Callable
 from functools import partial
 
+from .direct import AnyReceiver
+from .direct import DirectDevice
+from .direct import PresenceWatcher
 from .discovery import find_receivers
 from .listener import NotificationListener
 from .models import Notification
@@ -33,12 +42,13 @@ class ReceiverManager(threading.Thread):
     the bus.
 
     `receivers` are the already-open receivers resolved at application
-    startup; the manager takes over responsibility for (eventually) closing
-    them.
+    startup, and any `DirectDevice`s; the manager takes over responsibility
+    for (eventually) closing them. There may be no USB receivers at all.
 
-    `rebind(receivers)` is called with freshly opened receivers after every
-    rebuild. It should re-resolve `PairedDevice` references and swap them
-    into whatever holds them (reconciler, status maps, ...), raising -- e.g.
+    `rebind(receivers)` is called with freshly opened receivers, followed by
+    the same `DirectDevice`s as ever, after every rebuild. It should
+    re-resolve `PairedDevice` references and swap them into whatever holds
+    them (reconciler, status maps, ...), raising -- e.g.
     `DeviceNotFound` -- if something it needs is missing; the manager then
     closes the receivers, waits, and retries discovery.
 
@@ -49,13 +59,19 @@ class ReceiverManager(threading.Thread):
 
     def __init__(
         self,
-        receivers: list[Receiver],
-        rebind: Callable[[list[Receiver]], None],
-        callback: Callable[[Receiver, Notification], None],
+        receivers: list[AnyReceiver],
+        rebind: Callable[[list[AnyReceiver]], None],
+        callback: Callable[[AnyReceiver, Notification], None],
         rediscovery_interval: float = REDISCOVERY_INTERVAL,
     ):
         super().__init__(daemon=True)
-        self._receivers = receivers
+        self._receivers: list[Receiver] = [
+            r for r in receivers if not isinstance(r, DirectDevice)
+        ]
+        self._direct_devices: list[DirectDevice] = [
+            r for r in receivers if isinstance(r, DirectDevice)
+        ]
+        self._watchers: list[PresenceWatcher] = []
         self._rebind = rebind
         self._callback = callback
         self._rediscovery_interval = rediscovery_interval
@@ -68,6 +84,7 @@ class ReceiverManager(threading.Thread):
         self._lost.set()
 
     def run(self) -> None:
+        self._start_watchers()
         try:
             self._activate()
         except Exception:
@@ -85,6 +102,20 @@ class ReceiverManager(threading.Thread):
             self._recover()
 
         self._teardown()
+        self._stop_watchers()
+
+    def _start_watchers(self) -> None:
+        for device in self._direct_devices:
+            watcher = PresenceWatcher(device, partial(self._callback, device))
+            watcher.start()
+            self._watchers.append(watcher)
+
+    def _stop_watchers(self) -> None:
+        for watcher in self._watchers:
+            watcher.stop()
+        self._watchers = []
+        for device in self._direct_devices:
+            device.close()
 
     def _activate(self) -> None:
         """Start listening on the current receivers.
@@ -104,6 +135,10 @@ class ReceiverManager(threading.Thread):
             self._listeners.append(listener)
         for receiver in self._receivers:
             receiver.notify_devices()
+        # After a rebind, whoever holds the devices has forgotten their
+        # state; have the watchers say it again.
+        for device in self._direct_devices:
+            device.notify_devices()
 
     def _teardown(self) -> None:
         for listener in self._listeners:
@@ -128,7 +163,7 @@ class ReceiverManager(threading.Thread):
             try:
                 for info in find_receivers():
                     self._receivers.append(Receiver(info))
-                self._rebind(list(self._receivers))
+                self._rebind([*self._receivers, *self._direct_devices])
                 self._activate()
             except Exception as error:
                 logger.debug("Rediscovery attempt failed: %s", error)

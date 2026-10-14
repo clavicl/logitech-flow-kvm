@@ -1,6 +1,7 @@
 import glob
 import os
 
+from .models import BluetoothNodeInfo
 from .models import ReceiverInfo
 
 LOGITECH_VENDOR_ID = 0x046D
@@ -17,6 +18,12 @@ KNOWN_RECEIVERS: dict[int, str] = {
 HIDPP_USB_INTERFACE = 2
 
 HIDRAW_SYSFS_GLOB = "/sys/class/hidraw/hidraw*"
+
+BLUETOOTH_BUS = 0x0005
+
+# "Report ID 0x11" in a HID report descriptor: the long HID++ report. A
+# Bluetooth node declaring it speaks HID++ directly, as device number 0xFF.
+HIDPP_LONG_REPORT_DESCRIPTOR = b"\x85\x11"
 
 
 def _read_uevent(uevent_path: str) -> dict[str, str]:
@@ -37,6 +44,54 @@ def _parse_interface_number(hid_phys: str) -> int | None:
             break
         digits += ch
     return int(digits) if digits else None
+
+
+def _read_report_descriptor(node: str) -> bytes:
+    try:
+        with open(os.path.join(node, "device", "report_descriptor"), "rb") as f:
+            return f.read()
+    except OSError:
+        return b""
+
+
+def _parse_hid_id(hid_id: str) -> tuple[int, int, int] | None:
+    try:
+        bus_hex, vendor_hex, product_hex = hid_id.split(":")
+        return int(bus_hex, 16), int(vendor_hex, 16), int(product_hex, 16) & 0xFFFF
+    except ValueError:
+        return None
+
+
+def find_bluetooth_devices() -> list[BluetoothNodeInfo]:
+    """Enumerate Logitech HID++ devices connected to this host over Bluetooth.
+
+    Unlike a receiver's node, each of these exists only while its device is
+    connected here: it vanishes when the device Easy-Switches to another
+    host, and comes back (possibly under a different hidraw number) when it
+    returns.
+    """
+    found = []
+    for node in sorted(glob.glob(HIDRAW_SYSFS_GLOB)):
+        uevent = _read_uevent(os.path.join(node, "device", "uevent"))
+        parsed = _parse_hid_id(uevent.get("HID_ID", ""))
+        if parsed is None:
+            continue
+        bus, vendor, product = parsed
+        if bus != BLUETOOTH_BUS or vendor != LOGITECH_VENDOR_ID:
+            continue
+        if HIDPP_LONG_REPORT_DESCRIPTOR not in _read_report_descriptor(node):
+            continue
+
+        found.append(
+            BluetoothNodeInfo(
+                path=f"/dev/{os.path.basename(node)}",
+                product_id=product,
+                name=uevent.get("HID_NAME", ""),
+                address=uevent.get("HID_UNIQ", ""),
+            )
+        )
+
+    return found
 
 
 def find_receivers() -> list[ReceiverInfo]:

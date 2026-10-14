@@ -19,11 +19,10 @@ from urllib3.exceptions import InsecureRequestWarning
 
 from .. import constants
 from .. import exceptions
+from ..hidpp import AnyReceiver
 from ..hidpp import Notification
 from ..hidpp import PairedDevice
-from ..hidpp import Receiver
 from ..hidpp import ReceiverManager
-from ..hidpp import find_receivers
 from ..reconciler import Reconciler
 from ..sse import parse_sse_stream
 from ..tui import ClientStatus
@@ -31,8 +30,8 @@ from ..tui import DeviceStatus
 from ..tui import FlowTUIApp
 from ..tui import render_client_status
 from ..util import get_host_certificate_path_and_token
-from ..util import get_theoretical_max_device_count
 from ..util import parse_connection_status
+from ..util import resolve_device_ids
 from ..util import resolve_devices
 from ..util import set_host_certificate_and_token
 from . import LogitechFlowKvmCommand
@@ -81,7 +80,11 @@ class FlowClient(LogitechFlowKvmCommand):
     clipboard_enabled: bool = True
 
     follower_devices: list[PairedDevice]
-    local_receivers: list[Receiver]
+    # As resolved at startup. On a receiver it can go stale (after a replug),
+    # which is fine: notifications then fall back to a live lookup. Over
+    # Bluetooth it is the only way the leader's notifications are matched.
+    leader_device: PairedDevice | None = None
+    local_receivers: list[AnyReceiver]
     manager: ReceiverManager
     reconciler: Reconciler
     # The leader's last-known host, as reported over the server's /events
@@ -135,14 +138,20 @@ class FlowClient(LogitechFlowKvmCommand):
             ),
         )
 
-    def _find_follower(self, receiver: Receiver, devnumber: int) -> PairedDevice | None:
-        """Match an incoming notification to an already-resolved follower."""
-        for device in self.follower_devices:
+    def _find_device(
+        self, receiver: AnyReceiver, devnumber: int
+    ) -> PairedDevice | None:
+        """Match an incoming notification to an already-resolved follower, or
+        the leader as resolved at startup."""
+        resolved = [*self.follower_devices]
+        if self.leader_device is not None:
+            resolved.append(self.leader_device)
+        for device in resolved:
             if device.receiver is receiver and device.number == devnumber:
                 return device
         return None
 
-    def callback(self, receiver: Receiver, notification: Notification) -> None:
+    def callback(self, receiver: AnyReceiver, notification: Notification) -> None:
         if notification.sub_id != 0x41:
             return
 
@@ -154,9 +163,10 @@ class FlowClient(LogitechFlowKvmCommand):
         # result is then not the key `Reconciler` stores connection state
         # under, so `observe()` silently discards the observation. A single
         # disconnect lost that way leaves the reconciler driving a device that
-        # has already left, forever. The live lookup remains for the leader,
-        # which (unlike on the server) the client never resolves up front.
-        device = self._find_follower(receiver, notification.devnumber)
+        # has already left, forever. The live lookup remains for a leader on
+        # a receiver that has since been rebuilt, which `_bind_receivers`
+        # doesn't re-resolve.
+        device = self._find_device(receiver, notification.devnumber)
         if device is None:
             device = receiver.get_device(notification.devnumber)
         if device is None:
@@ -509,28 +519,16 @@ class FlowClient(LogitechFlowKvmCommand):
         self.leader_id = response["leader"]
         self.follower_ids = response["followers"]
 
-        device_id_map: dict[str, PairedDevice | None] = {
-            follower: None for follower in self.follower_ids
-        }
-        self.local_receivers = []
-
         with Progress(transient=True) as progress:
-            enumerate_task = progress.add_task(
-                "Finding devices...", total=get_theoretical_max_device_count()
-            )
-            for info in find_receivers():
-                receiver = Receiver(info)
-                self.local_receivers.append(receiver)
-                for device in receiver.enumerate_devices():
-                    if device.serial in device_id_map:
-                        device_id_map[device.serial] = device
-                progress.advance(enumerate_task, receiver.max_devices)
+            progress.add_task("Finding devices...", total=None)
+            # The leader too: on a receiver, it's looked up lazily as its
+            # notifications arrive, but over Bluetooth nothing would notice
+            # it arrive unless a `DirectDevice` is watching for it.
+            resolved = resolve_device_ids([self.leader_id, *self.follower_ids])
 
-        self.follower_devices = []
-        for follower_id, found_device in device_id_map.items():
-            if found_device is None:
-                raise exceptions.DeviceNotFound(follower_id)
-            self.follower_devices.append(found_device)
+        self.local_receivers = [*resolved.receivers, *resolved.direct_devices]
+        self.leader_device = resolved.devices[self.leader_id]
+        self.follower_devices = [resolved.devices[i] for i in self.follower_ids]
 
         self.reconciler = Reconciler(
             self.follower_devices,
@@ -576,7 +574,7 @@ class FlowClient(LogitechFlowKvmCommand):
                 self.reconciler.stop()
                 self.manager.stop()
 
-    def _bind_receivers(self, receivers: list[Receiver]) -> None:
+    def _bind_receivers(self, receivers: list[AnyReceiver]) -> None:
         """Re-resolve the follower devices against freshly opened receivers;
         called by the `ReceiverManager` after a receiver was rediscovered
         post-replug. Raises `DeviceNotFound` (making the manager retry)

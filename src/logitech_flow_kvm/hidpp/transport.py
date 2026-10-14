@@ -20,10 +20,16 @@ class HidRawIO:
     notification listener) should open its own ``HidRawIO`` rather than share
     one across threads -- otherwise a blocking read on one thread can steal
     the reply another thread's request is waiting for.
+
+    `long_only` sends every report as a long (0x11) one, however short its
+    payload. A Bluetooth device's own hidraw node declares only the long
+    HID++ report in its descriptor, so a short report written to it is
+    silently dropped.
     """
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, *, long_only: bool = False):
         self.path = path
+        self.long_only = long_only
         self._fd = os.open(path, os.O_RDWR)
 
     def close(self) -> None:
@@ -36,7 +42,7 @@ class HidRawIO:
         self.close()
 
     def write(self, devnumber: int, payload: bytes, long_message: bool) -> None:
-        if long_message or len(payload) > SHORT_REPORT_SIZE - 2:
+        if self.long_only or long_message or len(payload) > SHORT_REPORT_SIZE - 2:
             body = payload.ljust(LONG_REPORT_SIZE - 2, b"\x00")
             report = bytes([LONG_MESSAGE_ID, devnumber]) + body
         else:
