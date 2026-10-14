@@ -1,6 +1,8 @@
+import dataclasses
 import datetime
 import ipaddress
 import json
+import logging
 import os
 import re
 import socket
@@ -21,11 +23,18 @@ from . import constants
 from .exceptions import CannotChangeHost
 from .exceptions import DeviceNotFound
 from .exceptions import NoCertificateAvailable
+from .hidpp import AnyReceiver
 from .hidpp import DeviceUnreachable
+from .hidpp import DirectDevice
 from .hidpp import PairedDevice
 from .hidpp import ProtocolError
 from .hidpp import Receiver
+from .hidpp import find_bluetooth_devices
 from .hidpp import find_receivers
+from .hidpp.direct import PATH_PREFIX as BLUETOOTH_PATH_PREFIX
+from .hidpp.direct import scan as scan_bluetooth_devices
+
+logger = logging.getLogger(__name__)
 
 
 class DeviceStatus(TypedDict):
@@ -77,7 +86,18 @@ def get_theoretical_max_device_count() -> int:
         with Receiver(info) as receiver:
             max_count += receiver.max_devices
 
-    return max_count
+    return max_count + len(find_bluetooth_devices())
+
+
+def _bluetooth_devices() -> list[DirectDevice]:
+    """A `DirectDevice` for each device connected over Bluetooth right now,
+    its node already open."""
+    devices = []
+    for node, device_id in scan_bluetooth_devices():
+        device = DirectDevice(device_id, node=node)
+        if device.refresh():
+            devices.append(device)
+    return devices
 
 
 def get_devices() -> Iterable[PairedDevice | None]:
@@ -88,10 +108,63 @@ def get_devices() -> Iterable[PairedDevice | None]:
         receiver = Receiver(info)
         for number in range(1, receiver.max_devices + 1):
             yield receiver.get_device(number)
+    for device in _bluetooth_devices():
+        yield device.paired_device
+
+
+@dataclasses.dataclass
+class ResolvedDevices:
+    """The outcome of `resolve_device_ids`."""
+
+    # Every receiver that was opened, whether or not it holds a wanted device.
+    receivers: list[Receiver]
+    # One per wanted id that isn't on a receiver.
+    direct_devices: list[DirectDevice]
+    devices: dict[str, PairedDevice]
+
+
+def resolve_device_ids(device_ids: Iterable[str]) -> ResolvedDevices:
+    """Resolve each id to a device on a local receiver, or failing that, to a
+    Bluetooth `DirectDevice`.
+
+    Never raises for a missing id. A device that isn't on any receiver may be
+    a Bluetooth device that's on another host right now, so a `DirectDevice`
+    is made for it either way and will pick it up whenever it connects here.
+    """
+    wanted = list(dict.fromkeys(device_ids))
+    receivers = [Receiver(info) for info in find_receivers()]
+    devices: dict[str, PairedDevice] = {}
+    for receiver in receivers:
+        for device in receiver.enumerate_devices():
+            if device.id in wanted and device.id not in devices:
+                devices[device.id] = device
+
+    missing = [device_id for device_id in wanted if device_id not in devices]
+    nodes = {
+        device_id: node
+        for node, device_id in (scan_bluetooth_devices() if missing else [])
+    }
+    direct_devices = []
+    for device_id in missing:
+        direct = DirectDevice(device_id, node=nodes.get(device_id))
+        if direct.refresh():
+            logger.info("Device %s is connected over Bluetooth", device_id)
+        else:
+            logger.warning(
+                "Device %s is not on any receiver or connected over Bluetooth; "
+                "waiting for it to connect over Bluetooth",
+                device_id,
+            )
+        direct_devices.append(direct)
+        devices[device_id] = direct.paired_device
+
+    return ResolvedDevices(
+        receivers=receivers, direct_devices=direct_devices, devices=devices
+    )
 
 
 def resolve_devices(
-    receivers: Iterable[Receiver], device_ids: Iterable[str]
+    receivers: Iterable[AnyReceiver], device_ids: Iterable[str]
 ) -> dict[str, PairedDevice]:
     """Resolve each id in `device_ids` to a `PairedDevice` on `receivers`.
 
@@ -115,6 +188,16 @@ def resolve_devices(
 
 
 def get_device_by_path(device_path: str) -> PairedDevice:
+    """Find a device by its path: "<hidraw>:<n>" for a device on a receiver,
+    or "bt:<ID>" for one connected over Bluetooth."""
+    if device_path.startswith(BLUETOOTH_PATH_PREFIX):
+        device_id = device_path[len(BLUETOOTH_PATH_PREFIX) :]
+        for node, found_id in scan_bluetooth_devices():
+            direct = DirectDevice(device_id, node=node)
+            if direct.matches(node, found_id) and direct.refresh():
+                return direct.paired_device
+        raise DeviceNotFound(device_path)
+
     if ":" not in device_path:
         raise DeviceNotFound(device_path)
 

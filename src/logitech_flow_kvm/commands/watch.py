@@ -3,9 +3,11 @@ from argparse import ArgumentParser
 
 from rich.console import Console
 
+from ..hidpp import DirectDevice
 from ..hidpp import Notification
 from ..hidpp import NotificationListener
 from ..hidpp import PairedDevice
+from ..hidpp import PresenceWatcher
 from ..util import get_device_by_path
 from ..util import parse_connection_status
 from . import LogitechFlowKvmCommand
@@ -59,8 +61,12 @@ class Watch(LogitechFlowKvmCommand):
         )
         self.console.print("[bold]Press CTRL+C to exit")
 
-        device.receiver.enable_connection_notifications()
-        listener = NotificationListener(device.receiver.path, self.callback)
+        listener: NotificationListener | PresenceWatcher
+        if isinstance(device.receiver, DirectDevice):
+            listener = PresenceWatcher(device.receiver, self.callback)
+        else:
+            device.receiver.enable_connection_notifications()
+            listener = NotificationListener(device.receiver.path, self.callback)
         listener.start()
         try:
             listener.join()

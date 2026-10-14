@@ -12,6 +12,7 @@ from logitech_flow_kvm.commands import flow_server
 from logitech_flow_kvm.commands.flow_server import FlowServerAPI
 from logitech_flow_kvm.commands.flow_server import bind_routes
 from logitech_flow_kvm.exceptions import DeviceNotFound
+from logitech_flow_kvm.hidpp.direct import DirectDevice
 from logitech_flow_kvm.hidpp.manager import ReceiverManager
 from logitech_flow_kvm.hidpp.models import Notification
 from logitech_flow_kvm.hidpp.models import ReceiverInfo
@@ -621,3 +622,39 @@ class TestForgetLeaderHostIfOn:
         app.report_leader_host(2)
 
         assert app._get_desired_host() == 2
+
+
+class TestBluetoothLeader:
+    @pytest.fixture
+    def bluetooth_leader(self):
+        return DirectDevice("LEADER01", find_nodes=list)
+
+    @pytest.fixture
+    def bt_app(self, bluetooth_leader, follower_device):
+        return FlowServerAPI(
+            __name__,
+            host_number=1,
+            leader_device=bluetooth_leader.paired_device,
+            follower_devices=[follower_device],
+            hostnames=[],
+            binding_interface="0.0.0.0",
+            port=24801,
+        )
+
+    def test_its_presence_reports_the_leader_host(self, bt_app, bluetooth_leader):
+        bt_app.callback(
+            bluetooth_leader, bluetooth_leader.connection_notification(True)
+        )
+
+        assert bt_app._get_desired_host() == 1
+        assert bt_app._leader_connected is True
+
+    def test_its_absence_reports_nothing(self, bt_app, bluetooth_leader):
+        bt_app.callback(
+            bluetooth_leader, bluetooth_leader.connection_notification(False)
+        )
+
+        assert bt_app._get_desired_host() is None
+
+    def test_the_manager_watches_it(self, bt_app, bluetooth_leader):
+        assert bt_app.manager._direct_devices == [bluetooth_leader]

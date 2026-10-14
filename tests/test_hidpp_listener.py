@@ -8,7 +8,7 @@ from logitech_flow_kvm.hidpp.models import Notification
 
 
 class ScriptedHidRawIO:
-    """Stands in for HidRawIO: replays scripted reports, then raises OSError
+    """Stands in for an opened node: replays scripted reports, then raises OSError
     (as a real hidraw read does once the receiver is unplugged)."""
 
     reports: list[tuple[int, int, bytes]] = []
@@ -33,7 +33,7 @@ CONNECT_REPORT = (0x10, 0x01, b"\x41\x04\x61\x10\x00")
 
 @pytest.fixture
 def scripted_io(monkeypatch):
-    monkeypatch.setattr(listener_module, "HidRawIO", ScriptedHidRawIO)
+    monkeypatch.setattr(listener_module, "open_device", ScriptedHidRawIO)
     return ScriptedHidRawIO
 
 
@@ -68,7 +68,7 @@ def test_on_disconnect_fires_when_the_node_cannot_be_opened(monkeypatch):
         def __init__(self, path):
             raise OSError("no such device")
 
-    monkeypatch.setattr(listener_module, "HidRawIO", UnopenableIO)
+    monkeypatch.setattr(listener_module, "open_device", UnopenableIO)
     disconnected = []
 
     listener = NotificationListener(
@@ -97,7 +97,7 @@ def test_on_disconnect_does_not_fire_when_stopped(monkeypatch):
             reading.set()
             return None
 
-    monkeypatch.setattr(listener_module, "HidRawIO", IdleIO)
+    monkeypatch.setattr(listener_module, "open_device", IdleIO)
     disconnected = []
 
     listener = NotificationListener(

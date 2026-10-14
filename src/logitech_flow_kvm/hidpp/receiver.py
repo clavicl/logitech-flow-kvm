@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+from typing import TYPE_CHECKING
 
 from .exceptions import ProtocolError
 from .models import DEVICE_KIND
@@ -9,7 +10,11 @@ from .models import ReceiverInfo
 from .protocol import RECEIVER_DEVNUMBER
 from .protocol import HidppConnection
 from .protocol import Transport
-from .transport import HidRawIO
+from .transport import HidIO
+from .transport import open_device
+
+if TYPE_CHECKING:
+    from .direct import DirectDevice
 
 RECEIVER_INFO_REGISTER = 0x2B5
 NOTIFICATIONS_REGISTER = 0x00
@@ -43,9 +48,10 @@ def _decode_codename(raw: bytes, *, length_offset: int, text_offset: int) -> str
 
 @dataclasses.dataclass(frozen=True)
 class PairedDevice:
-    """A device paired with a receiver, as reported by its pairing registers."""
+    """A device paired with a receiver, as reported by its pairing registers --
+    or a Bluetooth device, whose `receiver` is then its `DirectDevice`."""
 
-    receiver: Receiver
+    receiver: Receiver | DirectDevice
     number: int
     wpid: str
     kind: str
@@ -58,6 +64,10 @@ class PairedDevice:
 
     @property
     def path(self) -> str:
+        # A Bluetooth device is the only device behind its `DirectDevice`,
+        # whose path ("bt:<ID>") already names it.
+        if self.receiver.kind == "bluetooth":
+            return self.receiver.path
         return f"{self.receiver.path}:{self.number}"
 
 
@@ -65,13 +75,13 @@ class Receiver:
     """An open connection to a single Logitech receiver."""
 
     def __init__(self, info: ReceiverInfo, *, transport: Transport | None = None):
-        """`transport` is a test seam; production always opens a real `HidRawIO`."""
+        """`transport` is a test seam; production always opens the real node."""
         self.path = info.path
         self.kind = info.kind
         self.product_id = info.product_id
-        self._io: HidRawIO | None = None
+        self._io: HidIO | None = None
         if transport is None:
-            self._io = HidRawIO(info.path)
+            self._io = open_device(info.path)
             transport = self._io
         self._conn = HidppConnection(transport)
         self.max_devices = self._detect_max_devices()

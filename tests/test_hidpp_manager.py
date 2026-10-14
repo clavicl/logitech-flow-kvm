@@ -6,6 +6,7 @@ import pytest
 
 from logitech_flow_kvm.exceptions import DeviceNotFound
 from logitech_flow_kvm.hidpp import manager as manager_module
+from logitech_flow_kvm.hidpp.direct import DirectDevice
 from logitech_flow_kvm.hidpp.manager import ReceiverManager
 
 
@@ -54,6 +55,31 @@ def env(monkeypatch):
         def stop(self):
             env.log.append(("listener-stop", self.path))
 
+    class FakeDirectDevice(DirectDevice):
+        def __init__(self, device_id):
+            super().__init__(device_id, find_nodes=list)
+
+        def notify_devices(self):
+            env.log.append(("notify", self.path))
+
+        def close(self):
+            env.log.append(("close", self.path))
+
+    class FakeWatcher:
+        def __init__(self, device, callback):
+            self.device = device
+            self.callback = callback
+            env.watchers.append(self)
+
+        def start(self):
+            env.log.append(("watcher-start", self.device.path))
+
+        def stop(self):
+            env.log.append(("watcher-stop", self.device.path))
+
+    env.watchers = []
+    env.FakeDirectDevice = FakeDirectDevice
+    monkeypatch.setattr(manager_module, "PresenceWatcher", FakeWatcher)
     monkeypatch.setattr(manager_module, "Receiver", FakeReceiver)
     monkeypatch.setattr(manager_module, "NotificationListener", FakeListener)
     monkeypatch.setattr(manager_module, "find_receivers", lambda: list(env.discovered))
@@ -164,3 +190,51 @@ class TestStop:
 
         assert ("listener-stop", "r0") in env.log
         assert ("close", "r0") in env.log
+
+
+class TestBluetoothDevices:
+    def test_watches_them_with_no_usb_receivers_at_all(self, env):
+        device = env.FakeDirectDevice("F83FB9E1")
+        received = []
+        manager = ReceiverManager(
+            [device],
+            rebind=lambda receivers: None,
+            callback=lambda receiver, notification: received.append(receiver),
+            rediscovery_interval=0.01,
+        )
+
+        manager.start()
+        wait_for(lambda: ("notify", "bt:F83FB9E1") in env.log)
+        env.watchers[0].callback("notification")
+        stop_and_join(manager)
+
+        assert received == [device]
+        assert env.log.index(("watcher-start", "bt:F83FB9E1")) < env.log.index(
+            ("notify", "bt:F83FB9E1")
+        )
+        assert ("watcher-stop", "bt:F83FB9E1") in env.log
+        assert ("close", "bt:F83FB9E1") in env.log
+
+    def test_keeps_them_across_a_receiver_rebuild(self, env):
+        device = env.FakeDirectDevice("F83FB9E1")
+        rebinds: list[list] = []
+        manager = make_manager(
+            env, [env.FakeReceiver("r0"), device], rebind=rebinds.append
+        )
+
+        manager.start()
+        wait_for(lambda: ("notify", "r0") in env.log)
+        env.discovered = ["r1"]
+        env.listeners[0].on_disconnect()
+        wait_for(lambda: ("notify", "r1") in env.log)
+        stop_and_join(manager)
+
+        assert len(rebinds) == 1
+        assert [r.path for r in rebinds[0]] == ["r1", "bt:F83FB9E1"]
+        assert rebinds[0][1] is device
+        # Started once, never torn down by the rebuild; re-announced after it.
+        assert env.log.count(("watcher-start", "bt:F83FB9E1")) == 1
+        assert env.log.count(("close", "bt:F83FB9E1")) == 1
+        assert env.log.count(("notify", "bt:F83FB9E1")) == 2
+        # Only USB receivers get notification listeners.
+        assert [listener.path for listener in env.listeners] == ["r0", "r1"]

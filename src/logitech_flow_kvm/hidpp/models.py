@@ -24,6 +24,18 @@ class ReceiverInfo:
 
 
 @dataclasses.dataclass(frozen=True)
+class BluetoothNodeInfo:
+    """A Logitech device's own hidraw node, present while it is connected to
+    this host over Bluetooth."""
+
+    path: str
+    product_id: int
+    name: str
+    # The device's Bluetooth address (`HID_UNIQ`), e.g. "d4:82:c5:97:17:4d".
+    address: str
+
+
+@dataclasses.dataclass(frozen=True)
 class ChangeHostInfo:
     feature_index: int
     num_hosts: int

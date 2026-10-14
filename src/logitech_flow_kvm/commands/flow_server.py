@@ -18,10 +18,9 @@ from rich.progress import Progress
 from rich.prompt import Prompt
 
 from .. import constants
-from .. import exceptions
+from ..hidpp import AnyReceiver
 from ..hidpp import Notification
 from ..hidpp import PairedDevice
-from ..hidpp import Receiver
 from ..hidpp import ReceiverManager
 from ..reconciler import Reconciler
 from ..sse import EventBroadcaster
@@ -31,9 +30,8 @@ from ..tui import FlowTUIApp
 from ..tui import ServerStatus
 from ..tui import render_server_status
 from ..util import get_certificate_key_path
-from ..util import get_devices
-from ..util import get_theoretical_max_device_count
 from ..util import parse_connection_status
+from ..util import resolve_device_ids
 from ..util import resolve_devices
 from . import LogitechFlowKvmCommand
 
@@ -118,7 +116,7 @@ class FlowServerAPI(Flask):
 
         # Supervise the distinct receivers backing the relevant devices
         # (leader and followers may share a receiver).
-        seen_receivers: list[Receiver] = []
+        seen_receivers: list[AnyReceiver] = []
         for device in (self.leader_device, *self.follower_devices):
             if device.receiver in seen_receivers:
                 continue
@@ -151,7 +149,7 @@ class FlowServerAPI(Flask):
         self.manager.start()
         self.reconciler.start()
 
-    def _bind_receivers(self, receivers: list[Receiver]) -> None:
+    def _bind_receivers(self, receivers: list[AnyReceiver]) -> None:
         """Re-resolve the leader/follower devices against freshly opened
         receivers; called by the `ReceiverManager` after a receiver was
         rediscovered post-replug. Raises `DeviceNotFound` (making the
@@ -238,7 +236,7 @@ class FlowServerAPI(Flask):
 
         return False
 
-    def callback(self, receiver: Receiver, notification: Notification) -> None:
+    def callback(self, receiver: AnyReceiver, notification: Notification) -> None:
         if notification.sub_id != 0x41:
             return
 
@@ -472,34 +470,24 @@ class FlowServer(LogitechFlowKvmCommand):
         )
 
     def handle(self) -> None:
-        device_id_map: dict[str, PairedDevice | None] = {
-            self.options.leader_device: None,
-            **{follower: None for follower in self.options.follower_devices},
-        }
         with Progress(transient=True) as progress:
-            enumerate_task = progress.add_task(
-                "Finding devices...", total=get_theoretical_max_device_count()
+            progress.add_task("Finding devices...", total=None)
+            resolved = resolve_device_ids(
+                [self.options.leader_device, *self.options.follower_devices]
             )
 
-            for possible_device in get_devices():
-                progress.advance(enumerate_task)
-                if possible_device is not None:
-                    if possible_device.serial in device_id_map:
-                        device_id_map[possible_device.serial] = possible_device
+        leader_device = resolved.devices[self.options.leader_device]
+        follower_devices = [
+            resolved.devices[device] for device in self.options.follower_devices
+        ]
 
-                if None not in device_id_map.values():
-                    break
-
-        found_devices: dict[str, PairedDevice] = {}
-        for device_id, found_device in device_id_map.items():
-            if found_device is None:
-                raise exceptions.DeviceNotFound(device_id)
-            found_devices[device_id] = found_device
-
-        leader_device = found_devices[self.options.leader_device]
-        follower_devices = []
-        for device in self.options.follower_devices:
-            follower_devices.append(found_devices[device])
+        # Receivers that hold none of these devices aren't needed.
+        wanted_receivers = {
+            device.receiver for device in (leader_device, *follower_devices)
+        }
+        for receiver in resolved.receivers:
+            if receiver not in wanted_receivers:
+                receiver.close()
 
         cert_path, key_path = get_certificate_key_path(
             "server", create=True, hostnames=self.options.hostname

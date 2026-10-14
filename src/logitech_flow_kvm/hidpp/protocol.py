@@ -16,7 +16,8 @@ DEFAULT_TIMEOUT = 2.0
 
 
 class Transport(Protocol):
-    """The subset of `HidRawIO` this layer depends on, so tests can inject a fake."""
+    """The subset of `HidRawIO` (and `HidApiIO`) this layer depends on, so
+    tests can inject a fake."""
 
     def write(self, devnumber: int, payload: bytes, long_message: bool) -> None: ...
 
