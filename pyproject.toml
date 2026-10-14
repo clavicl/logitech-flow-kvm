@@ -41,6 +41,7 @@ dependencies = [
     "pyperclip>=1.8.2,<2.0",
     "textual>=1.0",
     "hidapi>=0.14 ; sys_platform == 'win32'",
+    "pystray>=0.19 ; sys_platform == 'win32'",
 ]
 
 [project.urls]
@@ -50,6 +51,10 @@ Issues = "https://github.com/coddingtonbear/logitech-flow-kvm/issues"
 
 [project.scripts]
 logitech-flow-kvm = "logitech_flow_kvm.cli:main"
+
+[project.gui-scripts]
+# No console window: the client runs in the background behind a tray icon.
+logitech-flow-kvm-tray = "logitech_flow_kvm.tray:main"
 
 [project.entry-points."logitech_flow_kvm.commands"]
 list-devices = "logitech_flow_kvm.commands.list_devices:ListDevices"
